@@ -17,13 +17,18 @@ jobs:
       - name: Checkout branding repository
         uses: actions/checkout@v4
 
-      - name: Verify branding assets
+      - name: Verify exact branding assets
         shell: bash
         run: |
           set -euo pipefail
           test -s assets/icon0.png
+          test -s assets/playstore_bg_720_tested.b64
+          base64 -d assets/playstore_bg_720_tested.b64 > assets/playstore_bg.jpg
           test -s assets/playstore_bg.jpg
+          test "$(sha256sum assets/icon0.png | awk '{print $1}')" = "43cd1b467750c9fae29fb2d914b0ba4e638b290cedd9037d8c26c1661dc80584"
+          test "$(sha256sum assets/playstore_bg.jpg | awk '{print $1}')" = "142edf6b4f635b70548b237479e67ef3bd80bb7924eccc1ba050ce8d2176acce"
           file assets/icon0.png assets/playstore_bg.jpg
+          file assets/playstore_bg.jpg | grep -Fq '1280x720'
 
       - name: Clone exact official WebKit Autoloader v0.3.1-pre-3e9b02d
         shell: bash
@@ -40,9 +45,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          cp upstream/Dockerfile.sdk /tmp/Dockerfile.sdk
           python3 - <<'PY'
           from pathlib import Path
-          p = Path('upstream/Dockerfile.sdk')
+          p = Path('/tmp/Dockerfile.sdk')
           s = p.read_text()
           old = 'RUN git clone https://github.com/ps5-payload-dev/sdk.git ps5-payload-sdk-source'
           new = 'RUN git clone --branch v0.42 --depth 1 https://github.com/ps5-payload-dev/sdk.git ps5-payload-sdk-source'
@@ -55,13 +61,53 @@ jobs:
               raise SystemExit('dependency anchor missing')
           p.write_text(s.replace(old_dep, new_dep, 1))
           PY
-          docker build -t ps5-webkit-autoloader-sdk -f upstream/Dockerfile.sdk upstream
+          docker build -t ps5-webkit-autoloader-sdk -f /tmp/Dockerfile.sdk upstream
 
-      - name: Apply branding only
+      - name: Verify official pre-release version identity
         shell: bash
         run: |
           set -euo pipefail
-          docker run --rm -u "$(id -u):$(id -g)" -e BUILD_TYPE=pre-release -e CUSTOM_VERSION=pre-3e9b02d -v "$PWD/upstream":/src -w /src ps5-webkit-autoloader-sdk make icons
+          VERSION="$(docker run --rm -u "$(id -u):$(id -g)" -e BUILD_TYPE=pre-release -v "$PWD/upstream":/src -w /src ps5-webkit-autoloader-sdk python3 tools/gen_version.py --print)"
+          test "$VERSION" = "0.3.1-pre-3e9b02d"
+          test -z "$(git -C upstream status --porcelain)"
+          echo "Exact official version identity: $VERSION"
+
+      - name: Build untouched official reference and fingerprint exploit runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm -u "$(id -u):$(id -g)" \
+            -e BUILD_TYPE=pre-release \
+            -e FORCE_EXPLOIT=auto \
+            -v "$PWD/upstream":/src -w /src \
+            ps5-webkit-autoloader-sdk make clean all
+
+          VERSION="0.3.1-pre-3e9b02d"
+          test -s upstream/installer.elf
+          test -s "upstream/frontend/dist/app/$VERSION/app.js"
+          test -s "upstream/frontend/dist/app/$VERSION/payloads/payload.elf"
+          test -s "upstream/frontend/dist/app/$VERSION/slopkit/slopkit/poops.html"
+          test -s "upstream/frontend/dist/app/$VERSION/umtx2/index.html"
+
+          (
+            cd "upstream/frontend/dist/app/$VERSION"
+            find . -type f \
+              ! -name index.html \
+              ! -name style.css \
+              ! -name logo.svg \
+              ! -name favicon.svg \
+              ! -name playstore-bg.jpg \
+              -print0 | sort -z | xargs -0 sha256sum
+          ) > "$GITHUB_WORKSPACE/reference_runtime.sha256"
+          sha256sum upstream/frontend/autoloader/payloads/payload.elf > "$GITHUB_WORKSPACE/reference_payload.sha256"
+          cp upstream/installer.elf "$GITHUB_WORKSPACE/official_reference.elf"
+          echo "Official reference build passed."
+
+      - name: Apply Playstore branding only
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm -u "$(id -u):$(id -g)" -e BUILD_TYPE=pre-release -v "$PWD/upstream":/src -w /src ps5-webkit-autoloader-sdk make icons
           python3 builder/apply_branding.py upstream assets/icon0.png assets/playstore_bg.jpg
           touch upstream/assets/icon0.png \
                 upstream/frontend/autoloader/logo.svg \
@@ -73,65 +119,137 @@ jobs:
                 upstream/frontend/autoloader/index.html \
                 upstream/frontend/installer-page/index.html
 
-      - name: Verify no runtime source was changed
+      - name: Verify branding did not touch exploit/runtime source
         shell: bash
         run: |
           set -euo pipefail
-          test -z "$(git -C upstream status --short -- src include tools third_party)"
-          echo "Only branding/frontend files are modified:"
+          test -z "$(git -C upstream status --short -- src tools third_party)"
+          test -z "$(git -C upstream diff -- include/wkali.h)"
+          test "$(git -C upstream/third_party/ps5-unified-autoloader rev-parse HEAD)" = "955249d4c895ab1e9b7ae74e809da48e56a3f37c"
+          echo "Tracked modifications are branding/frontend only:"
           git -C upstream status --short
 
-      - name: Build final installer ELF
+          git -C upstream update-index --assume-unchanged \
+            assets/param.json.template \
+            assets/icon0.png \
+            frontend/autoloader/logo.svg \
+            frontend/autoloader/favicon.svg \
+            frontend/autoloader/index.html \
+            frontend/autoloader/style.css \
+            frontend/installer-page/logo.svg \
+            frontend/installer-page/favicon.svg \
+            frontend/installer-page/index.html
+          echo '/frontend/autoloader/playstore-bg.jpg' >> upstream/.git/info/exclude
+
+          test -z "$(git -C upstream status --porcelain)"
+          VERSION="$(docker run --rm -u "$(id -u):$(id -g)" -e BUILD_TYPE=pre-release -v "$PWD/upstream":/src -w /src ps5-webkit-autoloader-sdk python3 tools/gen_version.py --print)"
+          test "$VERSION" = "0.3.1-pre-3e9b02d"
+          echo "Branding tree still reports exact official version: $VERSION"
+
+      - name: Build branded final installer ELF
         shell: bash
         run: |
           set -euo pipefail
           docker run --rm -u "$(id -u):$(id -g)" \
             -e BUILD_TYPE=pre-release \
             -e FORCE_EXPLOIT=auto \
-            -e CUSTOM_VERSION=pre-3e9b02d \
             -v "$PWD/upstream":/src -w /src \
             ps5-webkit-autoloader-sdk make clean all
 
           test -s upstream/installer.elf
           cp upstream/installer.elf webkit-autoloader-installer_PLAYSTORE_v0.3.1-pre-3e9b02d.elf
 
-          FINAL_SHA="$(sha256sum webkit-autoloader-installer_PLAYSTORE_v0.3.1-pre-3e9b02d.elf | awk '{print $1}')"
-          FINAL_SIZE="$(stat -c %s webkit-autoloader-installer_PLAYSTORE_v0.3.1-pre-3e9b02d.elf)"
+      - name: Deep self-test staged frontend and exploit assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="0.3.1-pre-3e9b02d"
+          APP="upstream/frontend/dist/app/$VERSION"
+
+          test -s "$APP/playstore-bg.jpg"
+          cmp -s assets/playstore_bg.jpg "$APP/playstore-bg.jpg"
+          test "$(sha256sum "$APP/playstore-bg.jpg" | awk '{print $1}')" = "142edf6b4f635b70548b237479e67ef3bd80bb7924eccc1ba050ce8d2176acce"
+          grep -Fq 'background-image: url("playstore-bg.jpg")' "$APP/style.css"
+          grep -Fq '#splash .logo' "$APP/style.css"
+          grep -Fq 'display: none !important' "$APP/style.css"
+          grep -Fq 'Playstore WebKit v[[VERSION_PLACEHOLDER]]' "$APP/index.html"
+          grep -Fq "/app/$VERSION/playstore-bg.jpg" upstream/frontend/dist/cache.appcache
+
+          (
+            cd "$APP"
+            find . -type f \
+              ! -name index.html \
+              ! -name style.css \
+              ! -name logo.svg \
+              ! -name favicon.svg \
+              ! -name playstore-bg.jpg \
+              -print0 | sort -z | xargs -0 sha256sum
+          ) > "$GITHUB_WORKSPACE/branded_runtime.sha256"
+          diff -u "$GITHUB_WORKSPACE/reference_runtime.sha256" "$GITHUB_WORKSPACE/branded_runtime.sha256"
+
+          REF_PAYLOAD="$(awk '{print $1}' "$GITHUB_WORKSPACE/reference_payload.sha256")"
+          FINAL_PAYLOAD="$(sha256sum upstream/frontend/autoloader/payloads/payload.elf | awk '{print $1}')"
+          test "$REF_PAYLOAD" = "$FINAL_PAYLOAD"
+
+          python3 -m http.server 8765 --directory upstream/frontend/dist >/tmp/playstore_http.log 2>&1 &
+          HPID=$!
+          trap 'kill "$HPID" 2>/dev/null || true' EXIT
+          sleep 1
+          curl -fsS -o /dev/null "http://127.0.0.1:8765/app/$VERSION/index.html"
+          curl -fsS -o /tmp/served-bg.jpg "http://127.0.0.1:8765/app/$VERSION/playstore-bg.jpg"
+          cmp -s assets/playstore_bg.jpg /tmp/served-bg.jpg
+          curl -fsS -o /dev/null "http://127.0.0.1:8765/app/$VERSION/style.css"
+          curl -fsS -o /dev/null "http://127.0.0.1:8765/app/$VERSION/app.js"
+          curl -fsS -o /dev/null "http://127.0.0.1:8765/app/$VERSION/slopkit/slopkit/poops.html?go=1&auto=1&production=1&trigger=netcontrol&attempts=8"
+          curl -fsS -o /dev/null "http://127.0.0.1:8765/app/$VERSION/umtx2/index.html?autoload=payload.elf&v=1"
+          kill "$HPID"
+          trap - EXIT
+
+          grep -aFq "/app/$VERSION/playstore-bg.jpg" webkit-autoloader-installer_PLAYSTORE_v0.3.1-pre-3e9b02d.elf
+          grep -aFq "Playstore WebKit v$VERSION" webkit-autoloader-installer_PLAYSTORE_v0.3.1-pre-3e9b02d.elf
+          file webkit-autoloader-installer_PLAYSTORE_v0.3.1-pre-3e9b02d.elf
+          echo "Deep self-test PASSED."
+
+      - name: Build report
+        shell: bash
+        run: |
+          set -euo pipefail
+          FINAL=webkit-autoloader-installer_PLAYSTORE_v0.3.1-pre-3e9b02d.elf
+          FINAL_SHA="$(sha256sum "$FINAL" | awk '{print $1}')"
+          FINAL_SIZE="$(stat -c %s "$FINAL")"
           PAYLOAD_SHA="$(sha256sum upstream/frontend/autoloader/payloads/payload.elf | awk '{print $1}')"
           BG_SHA="$(sha256sum assets/playstore_bg.jpg | awk '{print $1}')"
           ICON_SHA="$(sha256sum assets/icon0.png | awk '{print $1}')"
-          VERSION="$(docker run --rm -u "$(id -u):$(id -g)" -e BUILD_TYPE=pre-release -e CUSTOM_VERSION=pre-3e9b02d -v "$PWD/upstream":/src -w /src ps5-webkit-autoloader-sdk python3 tools/gen_version.py --print)"
-          test "$VERSION" = "0.3.1-pre-3e9b02d"
+          RUNTIME_FINGERPRINT="$(sha256sum reference_runtime.sha256 | awk '{print $1}')"
 
           cat > BUILD_REPORT.txt <<EOF
-          PLAYSTORE WebKit Autoloader v0.3.1-pre-3e9b02d - branding-only build
+          PLAYSTORE WebKit Autoloader v0.3.1-pre-3e9b02d - tested branding-only build
           Official upstream WebKit commit: 3e9b02d49fedc54a26c66613a153df3b2e9909c2
           Official pinned Unified commit: 955249d4c895ab1e9b7ae74e809da48e56a3f37c
-          Runtime source changes: NONE
+          Runtime/exploit source changes: NONE
+          Runtime/exploit staged assets vs untouched official reference: BIT-FOR-BIT IDENTICAL
+          Runtime fingerprint: $RUNTIME_FINGERPRINT
           Custom autoload/restore changes: NONE
-          Default bundled Unified payload: upstream pinned release dependency
-          Bundled payload SHA256: $PAYLOAD_SHA
-          Branding changes only:
-          - Playstore home title
-          - supplied Playstore icon/logo
-          - fullscreen Playstore background on Autoloader splash/loader page
-          - existing splash logo/title/footer hidden because they are already rendered in the full-screen artwork
+          Bundled Unified payload SHA256: $PAYLOAD_SHA
+          Background: exact approved 1280x720 Playstore artwork
           Background SHA256: $BG_SHA
           Icon SHA256: $ICON_SHA
-          Final version string: $VERSION
+          HTTP staged-resource smoke test: PASS
+          Final embedded background route/title check: PASS
           Final ELF size: $FINAL_SIZE
           Final ELF SHA256: $FINAL_SHA
           EOF
-
-          file webkit-autoloader-installer_PLAYSTORE_v0.3.1-pre-3e9b02d.elf
           cat BUILD_REPORT.txt
 
-      - name: Upload final ELF
+      - name: Upload final tested ELF
         uses: actions/upload-artifact@v4
         with:
-          name: Playstore-WebKit-v0.3.1-pre-3e9b02d-Final-ELF
+          name: Playstore-WebKit-v0.3.1-pre-3e9b02d-TESTED-ELF
           path: |
             webkit-autoloader-installer_PLAYSTORE_v0.3.1-pre-3e9b02d.elf
             BUILD_REPORT.txt
+            reference_runtime.sha256
+            branded_runtime.sha256
+            assets/playstore_bg.jpg
           if-no-files-found: error
           retention-days: 30
