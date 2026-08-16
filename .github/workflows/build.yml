@@ -78,7 +78,11 @@ jobs:
           old='RUN git clone https://github.com/ps5-payload-dev/sdk.git ps5-payload-sdk-source'
           new='RUN git clone --branch v0.42 --depth 1 https://github.com/ps5-payload-dev/sdk.git ps5-payload-sdk-source'
           if old not in s: raise SystemExit('SDK clone anchor missing')
-          p.write_text(s.replace(old,new,1))
+          s=s.replace(old,new,1)
+          old_dep='    unzip \\\n    librsvg2-bin \\'
+          new_dep='    unzip \\\n    xxd \\\n    librsvg2-bin \\'
+          if old_dep not in s: raise SystemExit('dependency anchor missing')
+          p.write_text(s.replace(old_dep,new_dep,1))
           PY
           docker build -t ps5-webkit-autoloader-sdk -f upstream/Dockerfile.sdk upstream
 
