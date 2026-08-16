@@ -1,0 +1,14 @@
+Target: WebKit Autoloader 0.3.1-pre-3e9b02d
+Official commit: 3e9b02d49fedc54a26c66613a153df3b2e9909c2
+Pinned Unified commit: 955249d4c895ab1e9b7ae74e809da48e56a3f37c
+Runtime src/tools/submodule modifications: NONE
+Custom restore/autoload modifications: NONE
+Unified payload vs untouched baseline: BYTE-FOR-BYTE PASS
+JavaScript exploit/frontend files vs untouched baseline: 71 BYTE-FOR-BYTE PASS
+Background: existing official logo.svg route, embedded 16:9 artwork PASS
+Background CSS survived final make: PASS
+Title ID WKAL00001 preserved: PASS
+Baseline source-build ELF SHA256: b0db81d32f5ecb14f84a1df02e7afe09b82c87da8a592db6f4ae2afa6730c90a
+Bundled payload SHA256: 31d12ba2b0b11462a91756f4b8c7857e90674fc8df02fe74155c7c2a8f27a4fd
+Final ELF SHA256: 745cc7a80106735fd90dec1226e380d6f5630875bf7e99829f9eaae8d4c2a247
+NOTE: Static/build regression tests cannot emulate physical PS5 kernel exploitation; final hardware validation is on-console.
