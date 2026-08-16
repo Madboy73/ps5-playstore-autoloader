@@ -1,0 +1,200 @@
+name: Build TESTED Playstore PS5 ELF
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: playstore-tested-build
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      TARGET_COMMIT: 3e9b02d49fedc54a26c66613a153df3b2e9909c2
+      TARGET_UNIFIED: 955249d4c895ab1e9b7ae74e809da48e56a3f37c
+      TARGET_VERSION: 0.3.1-pre-3e9b02d
+
+    steps:
+      - name: Checkout branding repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify branding inputs
+        run: |
+          set -euo pipefail
+          test -s assets/icon0.png
+          test -s assets/playstore_bg.jpg
+          file assets/icon0.png assets/playstore_bg.jpg
+
+      - name: Clone exact official target twice
+        run: |
+          set -euo pipefail
+          git clone --recursive https://github.com/itsPLK/ps5-webkit-autoloader.git official
+          git -C official checkout "$TARGET_COMMIT"
+          git -C official submodule update --init --recursive
+          test "$(git -C official rev-parse HEAD)" = "$TARGET_COMMIT"
+          test "$(git -C official/third_party/ps5-unified-autoloader rev-parse HEAD)" = "$TARGET_UNIFIED"
+          grep -q '#define WKAL_VERSION "0.3.1"' official/include/wkali.h
+          cp -a official branded
+
+      - name: Build PS5 SDK image used for both baseline and branded builds
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          for root in [Path('official'), Path('branded')]:
+              p=root/'Dockerfile.sdk'
+              s=p.read_text()
+              old='RUN git clone https://github.com/ps5-payload-dev/sdk.git ps5-payload-sdk-source'
+              new='RUN git clone --branch v0.42 --depth 1 https://github.com/ps5-payload-dev/sdk.git ps5-payload-sdk-source'
+              if old not in s: raise SystemExit(f'SDK clone anchor missing in {p}')
+              s=s.replace(old,new,1)
+              old_dep='    unzip \\\n    librsvg2-bin \\'
+              new_dep='    unzip \\\n    xxd \\\n    librsvg2-bin \\'
+              if old_dep not in s: raise SystemExit(f'xxd dependency anchor missing in {p}')
+              p.write_text(s.replace(old_dep,new_dep,1))
+          PY
+          docker build -t ps5-webkit-autoloader-sdk -f official/Dockerfile.sdk official
+
+      - name: Build untouched official baseline
+        run: |
+          set -euo pipefail
+          docker run --rm -u "$(id -u):$(id -g)" \
+            -e BUILD_TYPE=pre-release -e CUSTOM_VERSION=pre-3e9b02d \
+            -v "$PWD/official":/src -w /src ps5-webkit-autoloader-sdk make clean all
+          test -s official/installer.elf
+          test -s official/frontend/autoloader/payloads/payload.elf
+          cp official/installer.elf baseline-official.elf
+
+      - name: Prepare branded tree cleanly
+        run: |
+          set -euo pipefail
+          docker run --rm -u "$(id -u):$(id -g)" \
+            -v "$PWD/branded":/src -w /src ps5-webkit-autoloader-sdk make clean
+          docker run --rm -u "$(id -u):$(id -g)" \
+            -v "$PWD/branded":/src -w /src ps5-webkit-autoloader-sdk make icons
+          python3 builder/apply_branding.py branded assets/icon0.png assets/playstore_bg.jpg
+          touch branded/assets/icon0.png \
+                branded/frontend/autoloader/logo.svg \
+                branded/frontend/installer-page/logo.svg \
+                branded/frontend/autoloader/favicon.svg \
+                branded/frontend/installer-page/favicon.svg \
+                branded/frontend/autoloader/style.css \
+                branded/frontend/autoloader/index.html \
+                branded/frontend/installer-page/index.html
+
+      - name: Test branding path before compilation
+        run: |
+          set -euo pipefail
+          # Critical runtime sources and pinned Unified must remain unchanged.
+          test -z "$(git -C branded status --short -- src tools third_party)"
+          test "$(git -C branded/third_party/ps5-unified-autoloader rev-parse HEAD)" = "$TARGET_UNIFIED"
+          cmp official/frontend/autoloader/app.js branded/frontend/autoloader/app.js
+
+          # Background deliberately reuses official logo.svg route; no new server route.
+          grep -Fq 'background-image: url("logo.svg")' branded/frontend/autoloader/style.css
+          grep -Fq 'viewBox="0 0 1920 1080"' branded/frontend/autoloader/logo.svg
+          grep -Fq 'data:image/jpeg;base64,' branded/frontend/autoloader/logo.svg
+          test ! -e branded/frontend/autoloader/playstore-bg.jpg
+
+      - name: Build branded ELF without post-branding clean
+        run: |
+          set -euo pipefail
+          docker run --rm -u "$(id -u):$(id -g)" \
+            -e BUILD_TYPE=pre-release -e CUSTOM_VERSION=pre-3e9b02d \
+            -v "$PWD/branded":/src -w /src ps5-webkit-autoloader-sdk make all
+          test -s branded/installer.elf
+          test -s branded/frontend/autoloader/payloads/payload.elf
+
+      - name: Deep regression tests against untouched baseline
+        run: |
+          set -euo pipefail
+          # Unified payload loaded by the frontend must be byte-for-byte baseline.
+          cmp official/frontend/autoloader/payloads/payload.elf branded/frontend/autoloader/payloads/payload.elf
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, sys
+          a=Path('official/frontend/autoloader'); b=Path('branded/frontend/autoloader')
+          # Every JavaScript file, including exploit chain/offsets, must be byte-identical.
+          af={p.relative_to(a):p for p in a.rglob('*.js')}
+          bf={p.relative_to(b):p for p in b.rglob('*.js')}
+          if set(af)!=set(bf):
+              print('FAIL JS file-set mismatch:', set(af)^set(bf)); sys.exit(1)
+          for rel in sorted(af):
+              ha=hashlib.sha256(af[rel].read_bytes()).digest()
+              hb=hashlib.sha256(bf[rel].read_bytes()).digest()
+              if ha!=hb:
+                  print('FAIL JS changed:', rel); sys.exit(1)
+          print(f'PASS: {len(af)} JS files byte-identical to official baseline')
+
+          # Verify branding assets still exist after make and CSS resolves locally.
+          css=(b/'style.css').read_text()
+          if 'background-image: url("logo.svg")' not in css: sys.exit('FAIL background CSS missing after build')
+          logo=b/'logo.svg'
+          if not logo.is_file() or logo.stat().st_size < 10000: sys.exit('FAIL background logo.svg missing/too small')
+          if 'data:image/jpeg;base64,' not in logo.read_text(): sys.exit('FAIL background JPEG not embedded')
+          print('PASS: fullscreen background survived build on existing logo.svg route')
+          PY
+
+          VERSION="$(docker run --rm -u "$(id -u):$(id -g)" -e BUILD_TYPE=pre-release -e CUSTOM_VERSION=pre-3e9b02d -v "$PWD/branded":/src -w /src ps5-webkit-autoloader-sdk python3 tools/gen_version.py --print)"
+          test "$VERSION" = "$TARGET_VERSION"
+          grep -Fq '"titleId": "WKAL00001"' branded/assets/param.json.template
+
+          # Sanity check generated/build files contain the pre-existing logo route.
+          grep -R -Fq 'logo.svg' branded/generated branded/build branded/frontend 2>/dev/null || { echo 'FAIL logo.svg route absent from generated/build tree'; exit 1; }
+
+      - name: Create test report and final ELF
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp branded/installer.elf dist/webkit-autoloader-installer_PLAYSTORE_v0.3.1-pre-3e9b02d_TESTED.elf
+          FINAL=dist/webkit-autoloader-installer_PLAYSTORE_v0.3.1-pre-3e9b02d_TESTED.elf
+          FINAL_SHA="$(sha256sum "$FINAL" | awk '{print $1}')"
+          BASE_SHA="$(sha256sum baseline-official.elf | awk '{print $1}')"
+          PAYLOAD_SHA="$(sha256sum branded/frontend/autoloader/payloads/payload.elf | awk '{print $1}')"
+          JS_COUNT="$(find branded/frontend/autoloader -type f -name '*.js' | wc -l)"
+          cat > dist/BUILD_REPORT_v0.3.1-pre-3e9b02d.txt <<EOF
+          Target: WebKit Autoloader 0.3.1-pre-3e9b02d
+          Official commit: $TARGET_COMMIT
+          Pinned Unified commit: $TARGET_UNIFIED
+          Runtime src/tools/submodule modifications: NONE
+          Custom restore/autoload modifications: NONE
+          Unified payload vs untouched baseline: BYTE-FOR-BYTE PASS
+          JavaScript exploit/frontend files vs untouched baseline: $JS_COUNT BYTE-FOR-BYTE PASS
+          Background: existing official logo.svg route, embedded 16:9 artwork PASS
+          Background CSS survived final make: PASS
+          Title ID WKAL00001 preserved: PASS
+          Baseline source-build ELF SHA256: $BASE_SHA
+          Bundled payload SHA256: $PAYLOAD_SHA
+          Final ELF SHA256: $FINAL_SHA
+          NOTE: Static/build regression tests cannot emulate physical PS5 kernel exploitation; final hardware validation is on-console.
+          EOF
+          file "$FINAL"
+          cat dist/BUILD_REPORT_v0.3.1-pre-3e9b02d.txt
+
+      - name: Upload tested artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Playstore-WebKit-v0.3.1-pre-3e9b02d-TESTED
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish tested output to repository dist folder
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f dist/webkit-autoloader-installer_PLAYSTORE_v0.3.1-pre-3e9b02d_TESTED.elf \
+                     dist/BUILD_REPORT_v0.3.1-pre-3e9b02d.txt
+          git commit -m "Publish tested Playstore v0.3.1-pre-3e9b02d ELF [skip ci]"
+          git push origin HEAD:main
