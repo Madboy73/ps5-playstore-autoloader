@@ -25,13 +25,16 @@ jobs:
           test -s assets/playstore_bg.jpg
           file assets/icon0.png assets/playstore_bg.jpg
 
-      - name: Clone exact official WebKit Autoloader v0.3.0
+      - name: Clone exact official WebKit Autoloader v0.3.1-pre-3e9b02d
         shell: bash
         run: |
           set -euo pipefail
-          git clone --branch v0.3.0 --recursive https://github.com/itsPLK/ps5-webkit-autoloader.git upstream
-          test "$(git -C upstream rev-parse HEAD)" = "a86320f9bb9c0c52726703c4b87ad9e53a9e13a8"
-          test "$(git -C upstream/third_party/ps5-unified-autoloader rev-parse HEAD)" = "78a6f0274f1581e233b69dd7dd4fd3b948a6d15c"
+          git clone --recursive https://github.com/itsPLK/ps5-webkit-autoloader.git upstream
+          git -C upstream checkout 3e9b02d49fedc54a26c66613a153df3b2e9909c2
+          git -C upstream submodule update --init --recursive
+          test "$(git -C upstream rev-parse HEAD)" = "3e9b02d49fedc54a26c66613a153df3b2e9909c2"
+          test "$(git -C upstream/third_party/ps5-unified-autoloader rev-parse HEAD)" = "955249d4c895ab1e9b7ae74e809da48e56a3f37c"
+          grep -q '#define WKAL_VERSION "0.3.1"' upstream/include/wkali.h
 
       - name: Build official PS5 SDK environment
         shell: bash
@@ -58,7 +61,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          docker run --rm -u "$(id -u):$(id -g)" -e BUILD_TYPE=stable -v "$PWD/upstream":/src -w /src ps5-webkit-autoloader-sdk make icons
+          docker run --rm -u "$(id -u):$(id -g)" -e BUILD_TYPE=pre-release -e CUSTOM_VERSION=pre-3e9b02d -v "$PWD/upstream":/src -w /src ps5-webkit-autoloader-sdk make icons
           python3 builder/apply_branding.py upstream assets/icon0.png assets/playstore_bg.jpg
           touch upstream/assets/icon0.png \
                 upstream/frontend/autoloader/logo.svg \
@@ -83,25 +86,27 @@ jobs:
         run: |
           set -euo pipefail
           docker run --rm -u "$(id -u):$(id -g)" \
-            -e BUILD_TYPE=stable \
+            -e BUILD_TYPE=pre-release \
             -e FORCE_EXPLOIT=auto \
-            -e CUSTOM_VERSION= \
+            -e CUSTOM_VERSION=pre-3e9b02d \
             -v "$PWD/upstream":/src -w /src \
             ps5-webkit-autoloader-sdk make clean all
 
           test -s upstream/installer.elf
-          cp upstream/installer.elf webkit-autoloader-installer_PLAYSTORE_v0.3.0.elf
+          cp upstream/installer.elf webkit-autoloader-installer_PLAYSTORE_v0.3.1-pre-3e9b02d.elf
 
-          FINAL_SHA="$(sha256sum webkit-autoloader-installer_PLAYSTORE_v0.3.0.elf | awk '{print $1}')"
-          FINAL_SIZE="$(stat -c %s webkit-autoloader-installer_PLAYSTORE_v0.3.0.elf)"
+          FINAL_SHA="$(sha256sum webkit-autoloader-installer_PLAYSTORE_v0.3.1-pre-3e9b02d.elf | awk '{print $1}')"
+          FINAL_SIZE="$(stat -c %s webkit-autoloader-installer_PLAYSTORE_v0.3.1-pre-3e9b02d.elf)"
           PAYLOAD_SHA="$(sha256sum upstream/frontend/autoloader/payloads/payload.elf | awk '{print $1}')"
           BG_SHA="$(sha256sum assets/playstore_bg.jpg | awk '{print $1}')"
           ICON_SHA="$(sha256sum assets/icon0.png | awk '{print $1}')"
+          VERSION="$(docker run --rm -u "$(id -u):$(id -g)" -e BUILD_TYPE=pre-release -e CUSTOM_VERSION=pre-3e9b02d -v "$PWD/upstream":/src -w /src ps5-webkit-autoloader-sdk python3 tools/gen_version.py --print)"
+          test "$VERSION" = "0.3.1-pre-3e9b02d"
 
           cat > BUILD_REPORT.txt <<EOF
-          PLAYSTORE WebKit Autoloader v0.3.0 - branding-only build
-          Official upstream WebKit commit: a86320f9bb9c0c52726703c4b87ad9e53a9e13a8
-          Official pinned Unified commit: 78a6f0274f1581e233b69dd7dd4fd3b948a6d15c
+          PLAYSTORE WebKit Autoloader v0.3.1-pre-3e9b02d - branding-only build
+          Official upstream WebKit commit: 3e9b02d49fedc54a26c66613a153df3b2e9909c2
+          Official pinned Unified commit: 955249d4c895ab1e9b7ae74e809da48e56a3f37c
           Runtime source changes: NONE
           Custom autoload/restore changes: NONE
           Default bundled Unified payload: upstream pinned release dependency
@@ -113,19 +118,20 @@ jobs:
           - existing splash logo/title/footer hidden because they are already rendered in the full-screen artwork
           Background SHA256: $BG_SHA
           Icon SHA256: $ICON_SHA
+          Final version string: $VERSION
           Final ELF size: $FINAL_SIZE
           Final ELF SHA256: $FINAL_SHA
           EOF
 
-          file webkit-autoloader-installer_PLAYSTORE_v0.3.0.elf
+          file webkit-autoloader-installer_PLAYSTORE_v0.3.1-pre-3e9b02d.elf
           cat BUILD_REPORT.txt
 
       - name: Upload final ELF
         uses: actions/upload-artifact@v4
         with:
-          name: Playstore-WebKit-v0.3.0-Final-ELF
+          name: Playstore-WebKit-v0.3.1-pre-3e9b02d-Final-ELF
           path: |
-            webkit-autoloader-installer_PLAYSTORE_v0.3.0.elf
+            webkit-autoloader-installer_PLAYSTORE_v0.3.1-pre-3e9b02d.elf
             BUILD_REPORT.txt
           if-no-files-found: error
           retention-days: 30
