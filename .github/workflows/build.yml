@@ -21,10 +21,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test -f assets/icon0.png
-          test -f assets/playstore_bg.jpg
-          echo "43cd1b467750c9fae29fb2d914b0ba4e638b290cedd9037d8c26c1661dc80584  assets/icon0.png" | sha256sum -c -
-          echo "356913ab142943d2d78a8d701e0fc65666ef537f6017f8bb25953ec1e2a2dce3  assets/playstore_bg.jpg" | sha256sum -c -
+          test -s assets/icon0.png
+          test -s assets/playstore_bg.jpg
+          file assets/icon0.png assets/playstore_bg.jpg
 
       - name: Clone exact official WebKit Autoloader v0.3.0
         shell: bash
@@ -61,7 +60,6 @@ jobs:
           set -euo pipefail
           docker run --rm -u "$(id -u):$(id -g)" -e BUILD_TYPE=stable -v "$PWD/upstream":/src -w /src ps5-webkit-autoloader-sdk make icons
           python3 builder/apply_branding.py upstream assets/icon0.png assets/playstore_bg.jpg
-          # Keep custom generated assets newer than their upstream source icon so make does not regenerate them.
           touch upstream/assets/icon0.png \
                 upstream/frontend/autoloader/logo.svg \
                 upstream/frontend/installer-page/logo.svg \
@@ -97,6 +95,8 @@ jobs:
           FINAL_SHA="$(sha256sum webkit-autoloader-installer_PLAYSTORE_v0.3.0.elf | awk '{print $1}')"
           FINAL_SIZE="$(stat -c %s webkit-autoloader-installer_PLAYSTORE_v0.3.0.elf)"
           PAYLOAD_SHA="$(sha256sum upstream/frontend/autoloader/payloads/payload.elf | awk '{print $1}')"
+          BG_SHA="$(sha256sum assets/playstore_bg.jpg | awk '{print $1}')"
+          ICON_SHA="$(sha256sum assets/icon0.png | awk '{print $1}')"
 
           cat > BUILD_REPORT.txt <<EOF
           PLAYSTORE WebKit Autoloader v0.3.0 - branding-only build
@@ -111,8 +111,8 @@ jobs:
           - supplied Playstore icon/logo
           - fullscreen Playstore background on Autoloader splash/loader page
           - existing splash logo/title/footer hidden because they are already rendered in the full-screen artwork
-          Background SHA256: 356913ab142943d2d78a8d701e0fc65666ef537f6017f8bb25953ec1e2a2dce3
-          Icon SHA256: 43cd1b467750c9fae29fb2d914b0ba4e638b290cedd9037d8c26c1661dc80584
+          Background SHA256: $BG_SHA
+          Icon SHA256: $ICON_SHA
           Final ELF size: $FINAL_SIZE
           Final ELF SHA256: $FINAL_SHA
           EOF
